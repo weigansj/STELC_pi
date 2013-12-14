@@ -51,6 +51,9 @@ p = pyaudio.PyAudio()
 DEVICE_INDEX = p.get_default_input_device_info()['index']
 
 def callback(in_data, frame_count, time_info, status):
+  """
+  callback for pyaudio stream
+  """
   #print frame_count,time_info['input_buffer_adc_time'],time_info['current_time'],time_info['output_buffer_dac_time'],status
   if status & pyaudio.paInputUnderflow: COUNTER['InputUnderflow'] += 1
   if status & pyaudio.paInputOverflow: COUNTER['InputOverflow'] += 1

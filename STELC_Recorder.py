@@ -35,6 +35,8 @@ import wave
 #print rec.poll()
 DEBUG=0
 
+class RecordingError(Exception):
+  pass
 
 class Record:
   """
@@ -95,6 +97,7 @@ class Record:
     self.wf.setframerate(self.samplingRate)
     # set tracking flags
     self.endStreamTime = 0
+    self.timeLeft = 0
     self.isStarted = False
     self.isPaused = False
     self.isStopped = False
@@ -114,10 +117,11 @@ class Record:
     if status & pyaudio.paOutputUnderflow: self.errorCounter['OutputUnderflow'] += 1
     if status & pyaudio.paOutputOverflow: self.errorCounter['OutputOverflow'] += 1
     if status & pyaudio.paPrimingOutput: self.errorCounter['PrimingOutput'] += 1
-    # print status and time left
+    # set time left
+    self.timeLeft = self.endStreamTime-time_info['current_time']
+    # print staus and time left
     if DEBUG: print "status = %d, %fs left, start->%s, pause->%s, stop->%s" % (
-      status,self.endStreamTime-time_info['current_time'],
-      self.isStarted,self.isPaused,self.isStopped)
+      status,self.timeLeft,self.isStarted,self.isPaused,self.isStopped)
     # normally Continue recording
     returnStatus = pyaudio.paContinue
     # return Abort if stopped
@@ -162,6 +166,9 @@ class Record:
     self.isPaused = True
 
   def stop(self):
+    """
+    stop stream, close stream and close wave file
+    """
     self.isStarted = False
     self.isPaused = False
     self.isStopped = True
@@ -173,6 +180,8 @@ class Record:
     self.stream.stop_stream()
     self.stream.close()
     self.wf.close()
+    self.endStreamTime = 0
+    self.timeLeft = 0
     
   def __del__(self):
     """

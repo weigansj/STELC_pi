@@ -20,6 +20,7 @@ import time
 RECORD_SECONDS_DEFAULT = 10800
 #RECORD_SECONDS_DEFAULT = 40
 DEBUG = 1
+sR.DEBUG = DEBUG
   
 class Controller(threading.Thread):
   """
@@ -92,7 +93,7 @@ class Controller(threading.Thread):
     """
     Called when a cancel is requested from the display
     """
-    if self.recording():
+    if self.recorder.recordStreamActive():
       # if the controller thinks we are recording then stop
       self.recorder.stopRecording()
     # TODO hand off to next step here?

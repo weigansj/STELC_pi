@@ -9,7 +9,7 @@ which first needs to be installed in ~/Dropbox-Uloader as per
 This will require a Dropbox account and some interaction with
 Dropbox to get it set up.
 """
-import subprocess,os.path,sys
+import subprocess,os.path,sys,re
 
 UPLOADER = '/home/pi/Dropbox-Uploader/dropbox_uploader.sh'
 DEBUG = 1
@@ -19,15 +19,19 @@ class Upload():
   This is for keeping uploading the recoded file to Dropbox.
   """
   def __init__(self):
-    pass
+    self.progress = '0%'
+    self.localFile = ''
+    self.remoteFile = ''
 
   def upload(self,uploadFile):
-    localFile = os.path.abspath(uploadFile)
-    remoteFile = os.path.basename(localFile)
+    """
+    """
+    self.localFile = os.path.abspath(uploadFile)
+    self.remoteFile = os.path.basename(self.localFile)
     pipeOut = open('.dropbox_upload.out','w')
     pipeErr = open('.dropbox_upload.err','w')
     uploadPipe = subprocess.Popen(
-      [UPLOADER,'-p','upload',localFile,remoteFile],
+      [UPLOADER,'-p','upload',self.localFile,self.remoteFile],
       bufsize=-1,
       stdout=subprocess.PIPE,
       stderr=subprocess.PIPE,
@@ -38,10 +42,16 @@ class Upload():
       while line:
         pipeErr.write(line)
         pipeErr.flush()
+        myMatch = re.search(' ([0-9\.]+%)$',line)
+        if myMatch:
+          self.progress = myMatch.group(1)
+        if DEBUG: print "upload progress %s" % self.progress
         line = uploadPipe.stderr.readline()
 
     pipeOut.writelines(uploadPipe.stdout.readlines())
     if DEBUG: print uploadPipe.poll()
+    pipeOut.close()
+    pipeErr.close()
 
 if __name__ == '__main__':
   u = Upload()

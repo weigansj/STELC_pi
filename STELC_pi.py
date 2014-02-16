@@ -21,6 +21,7 @@ RECORD_SECONDS_DEFAULT = 10800
 #RECORD_SECONDS_DEFAULT = 40
 DEBUG = 1
 sR.DEBUG = DEBUG
+sU.DEBUG = DEBUG
   
 class Controller(threading.Thread):
   """
@@ -92,14 +93,24 @@ class Controller(threading.Thread):
   def cancel(self):
     """
     Called when a cancel is requested from the display
+    or the natural end of a process
     """
-    if self.recorder.recordStreamActive():
-      # if the controller thinks we are recording then stop
-      self.recorder.stopRecording()
-    # TODO hand off to next step here?
-    self.clearAll()
-    self.idle()
     print 'cancel method'
+    if self._recording_.isSet():
+      # if the controller thinks we are recording, clear the event and stop
+      self._recording_.clear()
+      recordedFile = self.recorder.stopRecording()
+      # now pass off to the next step
+      # self.convert(myFilename)
+      self.upload(recordedFile)
+      #self.idle()
+    elif self._converting_.isSet():
+      self._converting_.clear()
+    elif self._uploading_.isSet():
+      self._uploading_.clear()
+      uploadedFile = self.uploader.uploadFile
+      if DEBUG: print "upload %s complete" % self.uploader.progress
+      self.idle()
 
   def record(self, recordSeconds = RECORD_SECONDS_DEFAULT):
     """
@@ -132,12 +143,9 @@ class Controller(threading.Thread):
     #  self.display.time.deltaStart = time.time() + self.recorder.timeLeft()
     #  if DEBUG: print "countdown %s" % self.recorder.timeLeft()
     if not self.recorder.recordStreamActive():
-      self.recorder.stopRecording()
-      # TODO hand off to next step here?
-      self.clearAll()
-      self.idle()
+      self.cancel()
 
-  def convert(self):
+  def convert(self,filename):
     """
     Called when requested to convert
     """
@@ -155,12 +163,18 @@ class Controller(threading.Thread):
     """
     self.display.status.message = "converting..."
 
-  def upload(self):
+  def upload(self,uploadFile):
     """
     Called when requested to upload
     """
     self.clearAll()
     self._uploading_.set()
+    # do the upload here
+    self.uploader.uploadFile = uploadFile
+    self.uploader._startUpload_.set()
+    while not self.uploader._uploading_.isSet():
+      if DEBUG: "wait for upload to start"
+    #
     self.display.time.deltaStart = time.time()
     self.display.update(PROCESS)
     self.display.query.setDefaultQuery(self.cancelQueryNum)
@@ -171,6 +185,11 @@ class Controller(threading.Thread):
     Called while uploading is running (called from conrtroller run() loop)
     """
     self.display.status.message = "uploading..."
+    if not self.uploader._uploading_.isSet():
+      self.cancel()
+    else:
+      self.uploader.progress = self.uploader.upload.progress
+      self.display.status.message = "upload... %s" % self.uploader.progress
 
   def idle(self):
     """
@@ -207,14 +226,14 @@ class Recorder(threading.Thread):
     self._stop_ = threading.Event()
     # clear all threading events
     self._clear_ = threading.Event()
-    # start recording
-    self._startRecording_ = threading.Event()
+    ## start recording
+    #self._startRecording_ = threading.Event()
     # recording in process
     self._recording_ = threading.Event()
-    # pause recording
-    self._pauseRecording_ = threading.Event()
-    # stop recording
-    self._stopRecording_ = threading.Event()
+    ## pause recording
+    #self._pauseRecording_ = threading.Event()
+    ## stop recording
+    #self._stopRecording_ = threading.Event()
     # default attrributes
     self.record = None
     self.waveFilename = 'test.wav'
@@ -306,8 +325,10 @@ class Recorder(threading.Thread):
   def stopRecording(self):
     """
     stop a recording, delete the instance and reset to None
+    return the filename that was recorded
     """
     if self.record and self.recording():
+      filename = self.setFilename()
       # stop recording
       self.record.stop()
       # delete and reset the instance
@@ -319,13 +340,14 @@ class Recorder(threading.Thread):
       raise sR.RecordingError, 'can not stop; no active recording instance'
     else:
       raise threading.ThreadingError, 'can not stop; _recording_ event not set'
-  
+    return filename
+
   def run(self):
     while not self.stopped():
       if self._clear_.isSet(): self.clearAll()
-      elif self._stopRecording_.isSet(): self.stopRecording()
-      elif self._pauseRecording_.isSet(): self.pauseRecording()
-      elif self._startRecording_.isSet(): self.startRecording()
+      #elif self._stopRecording_.isSet(): self.stopRecording()
+      #elif self._pauseRecording_.isSet(): self.pauseRecording()
+      #elif self._startRecording_.isSet(): self.startRecording()
       time.sleep(LOOP_DELAY)
 
 
@@ -372,6 +394,16 @@ class Uploader(threading.Thread):
     self._stop_ = threading.Event()
     # clear all threading events
     self._clear_ = threading.Event()
+    # start the upload
+    # I think I will need this here becuase the upload
+    # blocks as opposed the the record.start() above which used the callback
+    # withing the STELC_Recorder module
+    self._startUpload_ = threading.Event()
+    # currently uploading
+    self._uploading_ = threading.Event()
+    self.upload = None
+    self.uploadFile = ''
+    self.progress = '0%'
   
   def clearAll(self,but=None):
     for a in self.__dict__:
@@ -391,9 +423,22 @@ class Uploader(threading.Thread):
   def stopped(self):
     return self._stop_.isSet()
 
+  def startUpload(self):
+    self._startUpload_.clear()
+    self.upload = sU.Upload()
+    self.upload.upload(self.uploadFile)
+    del self.upload
+    self.upload = None
+    self._uploading_.clear()
+  
   def run(self):
     while not self.stopped():
       if self._clear_.isSet(): self.clearAll()
+      elif self._startUpload_.isSet():
+        self._uploading_.set()
+        self.startUpload()
+      elif self._uploading_.isSet():
+        self.progress = self.upload.progress
       time.sleep(LOOP_DELAY)
       
 

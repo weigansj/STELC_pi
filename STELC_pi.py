@@ -425,6 +425,7 @@ class Uploader(threading.Thread):
 
   def startUpload(self):
     self._startUpload_.clear()
+    if DEBUG: print "_startUpload_ set filename: %s" % self.uploadFile
     self.upload = sU.Upload()
     self.upload.upload(self.uploadFile)
     del self.upload

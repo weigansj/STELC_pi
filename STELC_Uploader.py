@@ -25,11 +25,18 @@ class Upload():
 
   def upload(self,uploadFile):
     """
+    upload the file given and track the progess
     """
+    # local filename
     self.localFile = os.path.abspath(uploadFile)
+    # filename on Dropbox
     self.remoteFile = os.path.basename(self.localFile)
+    # files for stdout and stderr
     pipeOut = open('.dropbox_upload.out','w')
     pipeErr = open('.dropbox_upload.err','w')
+    # open the pipe
+    if DEBUG: print "upload command: %s %s %s %s %s" %(
+      UPLOADER,'-p','upload',self.localFile,self.remoteFile)
     uploadPipe = subprocess.Popen(
       [UPLOADER,'-p','upload',self.localFile,self.remoteFile],
       bufsize=-1,
@@ -49,10 +56,11 @@ class Upload():
         line = uploadPipe.stderr.readline()
 
     pipeOut.writelines(uploadPipe.stdout.readlines())
-    if DEBUG: print uploadPipe.poll()
+    if DEBUG: print "DONE %s" % uploadPipe.poll()
     pipeOut.close()
     pipeErr.close()
 
 if __name__ == '__main__':
   u = Upload()
   u.upload(sys.argv[-1])
+  del u

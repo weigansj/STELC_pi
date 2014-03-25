@@ -1,7 +1,10 @@
 #!/user/bin/python
-import threading
+from apiclient.discovery import build
+from oauth2client.client import OAuth2WebServerFlow
 
-class Schedule(threading.Thread):
+import httplib2
+
+class Schedule():
   """
   This is for keeping track of the schedule for recording,  I think I would like
   to use a Google Calendar API for this.

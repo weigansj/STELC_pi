@@ -19,7 +19,7 @@ class Upload():
   This is for keeping uploading the recoded file to Dropbox.
   """
   def __init__(self):
-    self.progress = '0%'
+    self.progress = '.'
     self.localFile = ''
     self.remoteFile = ''
 
@@ -37,6 +37,9 @@ class Upload():
     # open the pipe
     if DEBUG: print "upload command: %s %s %s %s %s" %(
       UPLOADER,'-p','upload',self.localFile,self.remoteFile)
+    # TODO for big files the -p optin does not seem to report the % uploaded
+    # However the stdout sill has the ..... perhaps I should just count the 
+    # dots for a progress meter.
     uploadPipe = subprocess.Popen(
       [UPLOADER,'-p','upload',self.localFile,self.remoteFile],
       bufsize=-1,

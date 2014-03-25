@@ -1,4 +1,4 @@
-#!/user/bin/python
+#!/usr/bin/python
 """
 Uploads a file to dropbox using the dropbox_uploader.sh from Andrea Fabrizi
 which first needs to be installed in ~/Dropbox-Uloader as per

@@ -19,6 +19,10 @@ import time
 # default record time if none given
 RECORD_SECONDS_DEFAULT = 10800
 #RECORD_SECONDS_DEFAULT = 40
+
+# string first argument for time.strftime()
+WAVE_FILENAME_FORMAT = 'STELC_%Y%m%d-%H%M.wav' # string first argument for time.strftime()
+
 DEBUG = 1
 sR.DEBUG = DEBUG
 sU.DEBUG = DEBUG
@@ -270,7 +274,7 @@ class Recorder(threading.Thread):
       else: self.waveFilename  = name[0]
     else:
       if not self.recording(): 
-        self.waveFilename = time.strftime('STELC_%Y%m%d-%H%M.wav',
+        self.waveFilename = time.strftime(WAVE_FILENAME_FORMAT,
                                           time.localtime())
     return self.waveFilename
 

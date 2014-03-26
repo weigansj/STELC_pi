@@ -24,17 +24,54 @@ from apiclient.discovery import build
 from oauth2client.client import SignedJwtAssertionCredentials
 from GoogleCreds import *
 
+import time
+from dateutil import parser
+import yaml
+
 class Schedule():
   """
   This is for keeping track of the schedule for recording,  I think I would like
   to use a Google Calendar API for this.
   """
   def __init__(self):
+    self._blankEvent = {
+      'id': '', # eventID for GoogleAPI
+      'start': time.time(),
+      'duration': 0.0,
+      'status': {'filename': None, # flag for the filename
+                 'uploaded': False, # flag for if the file has been uploaded
+                 'purged': False} # flag to if the file has been locally purged
+    }
+
+  def getNext(self):
+    """
+    return an eventDict for the next recording event
+    """
     pass
 
-  def start():
+  def getId(self,eventId):
+    """
+    return an eventDict for the recording event with the given Google eventId
+    """
     pass
 
+  def findOldEvent(self,filename):
+    """
+    return an old recording eventDict based on the filename
+    """
+    pass
+
+  def markUploaded(self,eventDict):
+    """
+    mark this event as Uploaded on the calendar
+    """
+    pass
+
+  def purge(self,eventDict):
+    """
+    purge the file for this event and mark as purged on the calendar
+    """
+    pass
 
 def main(argv):
   # Load the key in PKCS 12 format that you downloaded from the Google API
@@ -72,17 +109,22 @@ def main(argv):
     calendarId=OAUTH_SERVICE_SHARED_CALENDAR_ID,
     eventId = eventId).execute(http=http)
   print thisEvent['description']
+
+  s = Schedule()
+  e = s._blankEvent
+  e['id']=eventId
+  e['status']['filename']="testfile.wav"
   
   # modify the description
-  oldDescription = "%s" % thisEvent['description']
-  newDescription = "%s\n%s" % (oldDescription,"test")
+  #oldDescription = "%s" % thisEvent['description']
+  #newDescription = "%s\n%s" % (oldDescription,"test")
   service.events().patch(
     calendarId=OAUTH_SERVICE_SHARED_CALENDAR_ID,
-    eventId=eventId,
-    body={'description':newDescription}).execute(http=http)
+    eventId=e['id'],
+    body={'description':yaml.dump(e['status'],default_flow_style=False)}).execute(http=http)
   thisEvent = service.events().get(
     calendarId=OAUTH_SERVICE_SHARED_CALENDAR_ID,
-    eventId = eventId).execute(http=http)
+    eventId = e['id']).execute(http=http)
   print thisEvent['description']
     
 if __name__ == '__main__':

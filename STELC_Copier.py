@@ -2,124 +2,196 @@
 """
 used by STELC_pi to mount an inserted USB drive
 copy over the wav and log files and unmount the drive
-usb related classes originally from a March 17, 2014
-stackoverflow.com post by SpiRail
 """
-import re
-import subprocess
+import re,yaml,sys,os.path
+import subprocess,time
+from StringIO import StringIO
 
-#used as a quick way to handle shell commands
-def getFromShell_raw(command):
-    p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return p.stdout.readlines()
+DEBUG = 1
+PROGRESS_CHARS = ['\\','|','/','-']
 
-def getFromShell(command):
-    result = getFromShell_raw(command)
-    for i in range(len(result)):       
-        result[i] = result[i].strip() # strip out white space
-    return result
+class Copier():
+  """
+  """
+  def __init__(self):
+    self.progressCount = 0
+    self.progress = '.'
+    self.incrProgress()
+    self.devDict = {}
+    self.usbDevices = []
 
+  def incrProgress(self):
+    self.progressCount += 1
+    self.progress = PROGRESS_CHARS[self.progressCount % len(PROGRESS_CHARS)]
+    if DEBUG: 
+      sys.stdout.write("%s\r" % self.progress)
+      sys.stdout.flush()
 
+  def updateDeviceAttributes(self):
+    """
+    update the devDict and usbDevices attributes
+    """
+    self.incrProgress()
+    self.devDict = self.getDeviceDict()
+    self.usbDevices = self.getRemovableFilesystems()
 
-class Mass_storage_device(object):
-    def __init__(self, device_file):
-       self.device_file = device_file
-       self.mount_point = None
+  def getRemovableFilesystems(self):
+    """
+    returns a list of two item tuples of removable filesystems (like USB sticks)
+    the first item in the tuple is the partition device file
+    the second item is the parent device file
+    """
+    myList = []
+    for pKey in self.devDict.keys():
+      if (self.devDict[pKey]['usage'] == "filesystem" and
+          self.devDict[pKey]['is read only'] != '1'):
+        dObj = self.devDict[pKey]['partition']['part of']
+        for dKey in self.devDict.keys():
+          if (self.devDict[dKey]['object path'] == dObj and 
+              self.devDict[dKey]['removable'] == '1' and
+              self.devDict[dKey]['drive']['detachable'] == '1' and
+              self.devDict[dKey]['is read only'] != '1'):
+            myList.append((pKey,dKey))
+    return myList
 
-    def as_string(self):
-        return "%s -> %s" % (self.device_file, self.mount_point)
+  def getDeviceDict(self):
+    """
+    use udisks to get a list of all devices
+    """
+    # list all device files of devices known
+    devices = subprocess.check_output(['udisks --enumerate-device-files | grep -v "dev/disk"'],shell=True).splitlines()
+    devDict = {}
+    for d in devices:
+      devDict[d]=self.getInfoDict(d)
+      self.incrProgress()
+    return devDict
 
-    """ check if we are already mounted"""
-    def is_mounted(self):
-        result = getFromShell('mount | grep %s' % self.device_file)
-        if result:
-            dev, on, self.mount_point, null = result[0].split(' ', 3)
-            return True
-        return False
+  def getInfoDict(self,d):
+    """
+    use udisks to get the info from one device
+    """
+    keyOne = ''
+    keyTwo = ''
+    infoDict = {}
+    info = subprocess.check_output(['udisks','--show-info',d]).splitlines()
+    infoDict['object path'] = info[0].split(' ')[-1]
+    for item in info[1:]:
+      myMatch = re.search('^( +)([^ ][^:]*): *([^ ].*)?$',item)
+      if myMatch:
+        sp,key,val = myMatch.groups()
+        if DEBUG > 1: print "%s->%s->%s" % (d,key,val)
+        if len(sp) == 2:
+          infoDict[key] = val
+          keyOne = key
+        elif len(sp) == 4:
+          if type(infoDict[keyOne]) == str or \
+             infoDict[keyOne] == None:
+            infoDict[keyOne] = {}
+          infoDict[keyOne][key] = val
+          keyTwo = key
+        elif len(sp) == 6:
+          if type(infoDict[keyOne][keyTwo]) == str or \
+             infoDict[keyOne][keyTwo] == None:
+            infoDict[keyOne][keyTwo] = {}
+          infoDict[keyOne][keyTwo][key] = val
+    return infoDict
 
-    """ If not mounted, attempt to mount """
-    def mount(self):
-        if not self.is_mounted():
-            result = getFromShell('udisks --mount %s' % self.device_file)[0] #print result
-            if re.match('^Mounted',result): 
-                mounted, dev, at, self.mount_point = result.split(' ')
+  def mount(self,devTpl):
+    if self.devDict[devTpl[0]]['is mounted'] != '1':
+      subprocess.check_call(['udisks','--mount',devTpl[0]])
+    for d in devTpl: self.devDict[d] = self.getInfoDict(d)
+    self.incrProgress()
 
-        return self.mount_point
+  def getUsbMounts(self,deviceList):
+    mntList = []
+    for (p,d) in deviceList:
+      if self.devDict[p]['is mounted'] == '1':
+        mntList.append(self.devDict[p]['mount paths'].split()[0])
+    return mntList
 
-    def unmount(self):
-        if self.is_mounted():
-            result = getFromShell('udisks --unmount %s' % self.device_file) #print result
-            self.mount_point=None
+  def unmount(self,devTpl):
+    if self.devDict[devTpl[0]]['is mounted'] == '1':
+      subprocess.check_call(['udisks','--unmount',devTpl[0]])
+    for d in devTpl: self.devDict[d] = self.getInfoDict(d)
+    self.incrProgress()
 
-    def eject(self):
-        if self.is_mounted():
-            self.unmount()
-        result = getFromShell('udisks --eject %s' % self.device_file) #print result
-        self.mount_point=None
+  def detach(self,devTpl):
+    if self.devDict[devTpl[1]]['drive']['detachable'] == '1':
+      subprocess.check_call(['udisks','--detach',devTpl[1]])
+    for d in devTpl: self.devDict[d] = self.getInfoDict(d)
+    self.incrProgress()
 
+  def copy(self):
+    """
+    mount a usb stick, rsync the wav and log files, unmount and detach the stick
+    """
+    # locate and mount usb sticks
+    self.updateDeviceAttributes()
+    for usbDev in self.usbDevices:
+      try: self.mount(usbDev)
+      except: 
+        self.progress = "%s mount fail" % self.devDict[usbDev[0]]['label']
+        time.sleep(2.0)
+    # files for stdout and stderr
+    pipeOut = open('copy_stdout.log','w')
+    pipeErr = open('copy_stderr.log','w')
+    # loop trough each mounted stick
+    mntCount = 0
+    for mnt in self.getUsbMounts(self.usbDevices):
+      mntCount += 1
+      fileCount = 0
+      # open the pipe with the copy command
+      copyCmd = "rsync -Pt --modify-window=2 --include='*.wav' --include='*.log' --exclude='*' ./* %s/STELC_pi/" % mnt
+      if DEBUG: print "copy command: %s" % copyCmd
+      pipeOut.write("copy command: %s\n" % copyCmd)
+      pipeErr.write("copy command: %s\n" % copyCmd)
+      copyPipe = subprocess.Popen(copyCmd,
+        shell=True,
+        bufsize=-1,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        close_fds=True)
+      # poll lack of completion
+      while copyPipe.poll() == None:
+        # read any lines produced
+        line = copyPipe.stdout.readline()
+        while line:
+          pipeOut.write(line)
+          pipeOut.flush()
+          # count files
+          if re.search('^[^ ]',line): fileCount += 0.5
+          else: 
+            # extract % complete for each file
+            myMatch = re.search('\s([0-9]+%)\s',line)
+            if myMatch: self.progress = "%d.%d %s" % (mntCount,fileCount,myMatch.group(1))
+            if DEBUG: print "rsync progress %s" % self.progress
+          line = copyPipe.stdout.readline()
 
-class Mass_storage_management(object):
-    def __init__(self, label=None):
-        self.label = label
-        self.devices = [] 
-        self.devices_with_label(label=label)
+      pipeErr.writelines(copyPipe.stderr.readlines())
+      if DEBUG: print "rsync done %s" % copyPipe.poll()
 
-    def refresh(self):
-        self.devices_with_label(self.label)
+    pipeOut.close()
+    pipeErr.close()
 
-    """ Uses udisks to retrieve a raw list of all the /dev/sd* devices """
-    def get_sd_list(self):
-        devices = []
-        for d in getFromShell('udisks --enumerate-device-files'):
-            if re.match('^/dev/sd.$',d): 
-                devices.append(Mass_storage_device(device_file=d))
-        return devices
-
-
-    """ takes a list of devices and uses udisks --show-info 
-    to find their labels, then returns a filtered list"""
-    def devices_with_label(self, label=None):
-        self.devices = []
-        for d in self.get_sd_list():
-            if label is None:
-                self.devices.append(d)
-            else:
-                match_string = 'label:\s+%s' % (label)
-                for info in getFromShell('udisks --show-info %s' % d.device_file):
-                    if re.match(match_string,info): self.devices.append(d)
-        return self
-
-    def as_string(self):
-        string = ""
-        for d in self.devices:
-            string+=d.as_string()+'\n'
-        return string
-
-    def mount_all(self): 
-        for d in self.devices: d.mount()
-
-    def unmount_all(self): 
-        for d in self.devices: d.unmount()
-
-    def eject_all(self): 
-        for d in self.devices: d.eject()
-        self.devices = []
-
+    # locate, unmount, and detach usb sticks
+    self.updateDeviceAttributes()
+    for usbDev in self.usbDevices:
+      try: self.unmount(usbDev)
+      except: 
+        self.progress = "%s unmount fail" % self.devDict[usbDev[0]]['label']
+        time.sleep(2.0)
+      try: self.detach(usbDev)
+      except: 
+        self.progress = "%s detach fail" % self.devDict[usbDev[0]]['label']
+        time.sleep(2.0)
+    self.progress = "DONE"
+    if DEBUG: print "DONE"
+    time.sleep(10.0)
 
 
 if __name__ == '__main__':
-    name = 'my devices'
-    m = Mass_storage_management(name)
-    print m.as_string()
-
-    print "mounting"
-    m.mount_all()
-    print m.as_string()
-
-    print "un mounting"
-    m.unmount_all()
-    print m.as_string()
-
-    print "ejecting"
-    m.eject_all()
-    print m.as_string()
+  c = Copier()
+  c.updateDeviceAttributes()
+  print c.usbDevices
+  c.copy()

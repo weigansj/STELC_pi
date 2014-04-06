@@ -3,7 +3,7 @@
 from STELC_Display import *
 import STELC_Recorder as sR
 import STELC_Scheduler as sS
-import STELC_Uploader as sU
+import STELC_UploaderDropbox as sU
 import threading
 import time
 

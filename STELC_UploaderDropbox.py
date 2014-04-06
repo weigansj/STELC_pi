@@ -32,8 +32,8 @@ class Upload():
     # filename on Dropbox
     self.remoteFile = os.path.basename(self.localFile)
     # files for stdout and stderr
-    pipeOut = open('.dropbox_upload.out','w')
-    pipeErr = open('.dropbox_upload.err','w')
+    pipeOut = open('dropbox_upload_stdout.log','w')
+    pipeErr = open('dropbox_upload_stderr.log','w')
     # open the pipe
     if DEBUG: print "upload command: %s %s %s %s %s" %(
       UPLOADER,'-p','upload',self.localFile,self.remoteFile)

@@ -24,8 +24,17 @@ RECORD_SECONDS_DEFAULT = 60*90
 # string first argument for time.strftime()
 WAVE_FILENAME_FORMAT = 'STELC_%Y%m%d-%H%M.wav' # string first argument for time.strftime()
 
+# time HH:MM to daily update the schedule based on the calendar
+# (updates also happen after events)
+DAILY_UPDATE_TIME = "01:15"
+
 DEBUG = 1
 sR.DEBUG = DEBUG
+sR.INPUT_FORMAT = sR.pyaudio.paInt16
+sR.SAMPLE_SIZE = sR.pyaudio.get_sample_size(sR.INPUT_FORMAT)
+sR.INPUT_CHANNELS = 1
+sR.SAMPLING_RATE = 48000
+
 sU.DEBUG = DEBUG
 sS.DEBUG = DEBUG
 sC.DEBUG = DEBUG
@@ -54,7 +63,7 @@ class Controller(threading.Thread):
     self.display.query.addQuery(
       Query("Record?",[("Yes",8,False,Action('record()',gd)),
                        ("No",12,False,Action('pass',gd))],defaultResponse=0,
-                      up=3,down=3 # up or down buttons lead to Copy query
+                        up=3,down=4 # up leads to Copy down leads to Update
            ),makeDefault=True
     )
     self.recordQueryNum = 0
@@ -76,17 +85,25 @@ class Controller(threading.Thread):
     self.display.query.addQuery(
       Query("Copy?",[("Yes",8,False,Action('copy()',gd)),
                      ("No",12,False,Action('pass',gd))],defaultResponse=0,
-                      up=0,down=0 # up or down buttons lead to Record query
+                      up=3,down=0 # up or down buttons lead to Record query
            ),makeDefault=False
     )
     self.copyQueryNum = 3
+    # Call cancel just to get schedule updates
+    self.display.query.addQuery(
+      Query("Update?",[("Yes",8,False,Action('cancel()',gd)),
+                       ("No",12,False,Action('pass',gd))],defaultResponse=0,
+                        up=0,down=4 # up leads to Copy down leads to Update
+           ),makeDefault=False
+    )
+    self.updateQueryNum = 4
     # Can not cancel
     self.display.query.addQuery(
       Query("Please Wait",[("OK",12,False,Action('pass',gd)),]
                          ,defaultResponse=0
            ),makeDefault=False
     )
-    self.waitQueryNum = 4
+    self.waitQueryNum = 5
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -111,6 +128,7 @@ class Controller(threading.Thread):
         print a,self.__dict__[a].isSet()
 
   def start(self):
+    if DEBUG: print "expected size %d bytes" % self.getExpectedFilesize()
     self.recorder.start()
     self.scheduler.start()
     self.uploader.start()
@@ -126,6 +144,15 @@ class Controller(threading.Thread):
   def stopped(self):
     return self._stop_.isSet()
 
+  def getExpectedFilesize(self):
+    """
+    expected size in bytes
+    """
+    size = sR.SAMPLE_SIZE*sR.INPUT_CHANNELS*sR.SAMPLING_RATE
+    if self.scheduler.getDuration() > 0: size *= self.scheduler.getDuration()
+    else: size *= RECORD_SECONDS_DEFAULT
+    return size
+
   def cancel(self):
     """
     Called when a cancel is requested from the display
@@ -139,20 +166,31 @@ class Controller(threading.Thread):
       # now pass off to the next step
       # self.convert(myFilename)
       self.upload(recordedFile)
-      #self.idle()
     elif self._converting_.isSet():
       self._converting_.clear()
+      self.idle()
     elif self._uploading_.isSet():
       self._uploading_.clear()
       uploadedFile = self.uploader.uploadFile
       # TODO find way to terminate upload
       if DEBUG: print "upload %s complete" % self.uploader.progress
+      # if this is a scheduled event update the events upload status
+      if self.scheduler._event_.isSet():
+        self.scheduler.updateItems(uploaded=True)
+        # this marks the end of a scheduled event
+        self.scheduler._event_.clear()
+        # so we should update the schedule
+        self.updateSchedule()
       self.idle()
     elif self._copying_.isSet():
       self._copying_.clear()
       # TODO find way to terminate copy
       if DEBUG: print "copy progress: %s" % self.copier.progress
       self.idle()
+    else:
+      # update schedule if there was no event
+      # as is the case when the Update Query is selected
+      self.updateSchedule()
 
   def record(self, recordSeconds = RECORD_SECONDS_DEFAULT):
     """
@@ -163,7 +201,7 @@ class Controller(threading.Thread):
     self._recording_.set()
     # set up and start the recoring in the recorder thread
     self.recorder.setRecordSeconds(recordSeconds)
-    self.recorder.setFilename()
+    fn = self.recorder.setFilename()
     self.recorder.startRecording()
     # wait untill the recording actually starts
     # TODO this is risky because I do not want to block the display update
@@ -174,6 +212,9 @@ class Controller(threading.Thread):
     self.display.query.setDefaultQuery(self.stopQueryNum)
     self.display.query.clearMessage()
     print 'record method'
+    # if this is a scheduled event update the events filename
+    if self.scheduler._event_.isSet():
+      self.scheduler.updateItems(filename=fn)
 
   def recording(self):
     """
@@ -204,6 +245,7 @@ class Controller(threading.Thread):
     Called while converting is running (called from conrtroller run() loop)
     """
     self.display.status.message = "converting..."
+    self.cancel()
 
   def upload(self,uploadFile):
     """
@@ -260,6 +302,29 @@ class Controller(threading.Thread):
       self.copier.progress = self.copier.copy.progress
       self.display.status.message = "copy  %s" % self.copier.progress
 
+  def checkSchedule(self):
+    """
+    This is to see if we should start a recording based on the 
+    Schedule event attribute, not to find the next event
+    """
+    # if we are 15 minutes away start the countdown
+    if self.scheduler.isNear(15*60):
+      self.scheduler._event_.set()
+      self.display.time.deltaStart = self.scheduler.getStart()
+      self.display.status.message = "record in"
+      self.display.update(PROCESS)
+    # as soon as it is close to the time start recording
+    if self.scheduler.isNear():
+      self.scheduler._event_.set()
+      # provide the duration when starting record()
+      self.record(recordSeconds = self.scheduler.getDuration())
+
+  def updateSchedule(self):
+    """
+    This is to tell the scheduler to load the next event from the calendar
+    """
+    self.scheduler._update_.set()
+
   def idle(self):
     """
     Called when we want to return to idle
@@ -278,6 +343,7 @@ class Controller(threading.Thread):
       elif self._converting_.isSet(): self.converting()
       elif self._uploading_.isSet(): self.uploading()
       elif self._copying_.isSet(): self.copying()
+      else: self.checkSchedule()
         
       self.display.update()
       time.sleep(LOOP_DELAY)
@@ -430,6 +496,18 @@ class Scheduler(threading.Thread):
     self._stop_ = threading.Event()
     # clear all threading events
     self._clear_ = threading.Event()
+    # request update of schedule from calendar
+    self._update_ = threading.Event()
+    # when record is called as a result of a scheduled event
+    self._event_ = threading.Event()
+    # when an event needs updating back to the calendar
+    self._eventUpdate_ = threading.Event()
+    # this is created as the start because
+    # it needs to store an event
+    self.schedule = sS.Schedule()
+    # do an update on startup
+    self.schedule.connect()
+    self.schedule.getNext()
   
   def clearAll(self,but=None):
     for a in self.__dict__:
@@ -443,6 +521,45 @@ class Scheduler(threading.Thread):
           isinstance(self.__dict__[a],threading._Event)):
         print a,self.__dict__[a].isSet()
 
+  def updateEvent(self):
+    self._update_.clear()
+    self.schedule.connect()
+    nextEvent = self.schedule.getNext()
+    if DEBUG: print nextEvent
+
+  def getStart(self):
+    return self.schedule.event['start']
+
+  def getDuration(self):
+    return self.schedule.event['duration']
+
+  def isNear(self,howNear=10.*LOOP_DELAY):
+    """
+    if the time difference is than howNear return true
+    howNear default of 10x LOOP_DELAY is for starting
+    """
+    if (self.schedule.event['duration'] > 0 and 
+        self.schedule.event['start'] - time.time() >= 0 and
+        self.schedule.event['start'] - time.time() < howNear):
+     return True
+    else: return False
+
+  def updateItems(self,**status):
+    """
+      update items in the current events status
+    """
+    for (key,val) in status.items():
+      self.schedule.event['status'][key] = val
+    self._eventUpdate_.set()
+
+  def putEvent(self):
+    """
+    update calendar item descripts based on event status
+    """
+    self._eventUpdate_.clear()
+    self.schedule.connect()
+    self.schedule.putEvent()
+
   def stop(self):
     self._stop_.set()
 
@@ -452,6 +569,15 @@ class Scheduler(threading.Thread):
   def run(self):
     while not self.stopped():
       if self._clear_.isSet(): self.clearAll()
+      elif self._update_.isSet(): self.updateEvent()
+      elif self._event_.isSet(): pass
+      elif self._eventUpdate_.isSet(): self.putEvent()
+      elif time.strftime('%H:%M',time.localtime()) == DAILY_UPDATE_TIME:
+        startTime = time.time()
+        # if the update is fast, force it to take a minute
+        # so that my daily check only happens once
+        endTime = time.time()
+        if endTime - startTime <= 60.: time.sleep(60.+startTime-endTime)
       time.sleep(LOOP_DELAY)
 
 

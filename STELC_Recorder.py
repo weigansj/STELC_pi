@@ -35,6 +35,12 @@ import wave
 #print rec.poll()
 DEBUG=0
 
+INPUT_FORMAT = pyaudio.paInt16
+SAMPLE_SIZE = pyaudio.get_sample_size(INPUT_FORMAT)
+INPUT_CHANNELS = 1
+SAMPLING_RATE = 48000
+SECONDS = 10
+
 class RecordingError(Exception):
   pass
 
@@ -53,16 +59,16 @@ class Record:
   # but is also helps to minimize Input Overflows
   chunk = 65536
   #chunk = 1024
-  inputFormat = pyaudio.paInt16
-  inputChannels = 1
-  samplingRate = 48000
+  inputFormat = INPUT_FORMAT
+  inputChannels = INPUT_CHANNELS
+  samplingRate = SAMPLING_RATE
   errorCounter = {'InputUnderflow':0,
                    'InputOverflow':0,
                    'OutputUnderflow':0,
                    'OutputOverflow':0,
                    'PrimingOutput':0}
 
-  def __init__(self,recordSeconds=10,waveFilename="test_rec.wav",blocking=False):
+  def __init__(self,recordSeconds=SECONDS,waveFilename="test_rec.wav",blocking=False):
     """
     load PyAudio, create stream, and open wav file
     takes recordSeconds for the recording length

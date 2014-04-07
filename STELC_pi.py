@@ -4,6 +4,7 @@ from STELC_Display import *
 import STELC_Recorder as sR
 import STELC_Scheduler as sS
 import STELC_UploaderDropbox as sU
+import STELC_Copier as sC
 import threading
 import time
 
@@ -17,7 +18,7 @@ import time
 #RECORD_END_WARNING = 20
 
 # default record time if none given
-RECORD_SECONDS_DEFAULT = 10800
+RECORD_SECONDS_DEFAULT = 60*90
 #RECORD_SECONDS_DEFAULT = 40
 
 # string first argument for time.strftime()
@@ -26,6 +27,9 @@ WAVE_FILENAME_FORMAT = 'STELC_%Y%m%d-%H%M.wav' # string first argument for time.
 DEBUG = 1
 sR.DEBUG = DEBUG
 sU.DEBUG = DEBUG
+sS.DEBUG = DEBUG
+sC.DEBUG = DEBUG
+sC.DEFAULT_DIR = 'STELC_pi'
   
 class Controller(threading.Thread):
   """
@@ -33,10 +37,11 @@ class Controller(threading.Thread):
   controlling the display.  This is where the display triggered methods go
   And of course needs to communicate with a recorder thread
   """
-  def __init__(self,recorder,scheduler,uploader):
+  def __init__(self,recorder,scheduler,uploader,copier):
     self.recorder = recorder
     self.scheduler = scheduler
     self.uploader = uploader
+    self.copier = copier
     self.display = Display()
     self.display.status.message = DEFAULT_STATUS
     # create a namespace dictionary for the action methods
@@ -44,19 +49,44 @@ class Controller(threading.Thread):
     for key in dir(self):
       if hasattr(self,key): 
         gd[key] = getattr(self,key)
-    # add queries for query block
+    ## add queries for query block
+    # record query for manual start recording
     self.display.query.addQuery(
       Query("Record?",[("Yes",8,False,Action('record()',gd)),
-                       ("No",12,False,Action('pass',gd))],defaultResponse=0
+                       ("No",12,False,Action('pass',gd))],defaultResponse=0,
+                      up=3,down=3 # up or down buttons lead to Copy query
            ),makeDefault=True
     )
     self.recordQueryNum = 0
+    # cancel query for stopping uploads or copying
     self.display.query.addQuery(
       Query("Cancel?",[("Yes",8,True,Action('cancel()',gd)),
                        ("No",12,False,Action('pass',gd))],defaultResponse=1
            ),makeDefault=False
     )
     self.cancelQueryNum = 1
+    # Stop query for stopping recording
+    self.display.query.addQuery(
+      Query("Stop?",[("Yes",8,True,Action('cancel()',gd)),
+                     ("No",12,False,Action('pass',gd))],defaultResponse=1
+           ),makeDefault=False
+    )
+    self.stopQueryNum = 2
+    # Copy query for copying to USB disk
+    self.display.query.addQuery(
+      Query("Copy?",[("Yes",8,False,Action('copy()',gd)),
+                     ("No",12,False,Action('pass',gd))],defaultResponse=0,
+                      up=0,down=0 # up or down buttons lead to Record query
+           ),makeDefault=False
+    )
+    self.copyQueryNum = 3
+    # Can not cancel
+    self.display.query.addQuery(
+      Query("Please Wait",[("OK",12,False,Action('pass',gd)),]
+                         ,defaultResponse=0
+           ),makeDefault=False
+    )
+    self.waitQueryNum = 4
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -66,6 +96,7 @@ class Controller(threading.Thread):
     self._recording_ = threading.Event()
     self._converting_ = threading.Event()
     self._uploading_ = threading.Event()
+    self._copying_ = threading.Event()
 
   def clearAll(self,but=None):
     for a in self.__dict__:
@@ -83,6 +114,7 @@ class Controller(threading.Thread):
     self.recorder.start()
     self.scheduler.start()
     self.uploader.start()
+    self.copier.start()
     self.display.on()
     self.thread = threading.Thread(None, self.run, None, (), {})
     self.thread.start()
@@ -113,7 +145,13 @@ class Controller(threading.Thread):
     elif self._uploading_.isSet():
       self._uploading_.clear()
       uploadedFile = self.uploader.uploadFile
+      # TODO find way to terminate upload
       if DEBUG: print "upload %s complete" % self.uploader.progress
+      self.idle()
+    elif self._copying_.isSet():
+      self._copying_.clear()
+      # TODO find way to terminate copy
+      if DEBUG: print "copy progress: %s" % self.copier.progress
       self.idle()
 
   def record(self, recordSeconds = RECORD_SECONDS_DEFAULT):
@@ -133,7 +171,7 @@ class Controller(threading.Thread):
     # update the display
     self.display.time.deltaStart = time.time()
     self.display.update(PROCESS)
-    self.display.query.setDefaultQuery(self.cancelQueryNum)
+    self.display.query.setDefaultQuery(self.stopQueryNum)
     self.display.query.clearMessage()
     print 'record method'
 
@@ -181,7 +219,7 @@ class Controller(threading.Thread):
     #
     self.display.time.deltaStart = time.time()
     self.display.update(PROCESS)
-    self.display.query.setDefaultQuery(self.cancelQueryNum)
+    self.display.query.setDefaultQuery(self.waitQueryNum)
     print 'upload method'
 
   def uploading(self):
@@ -193,7 +231,34 @@ class Controller(threading.Thread):
       self.cancel()
     else:
       self.uploader.progress = self.uploader.upload.progress
-      self.display.status.message = "upload... %s" % self.uploader.progress
+      self.display.status.message = "upload %s" % self.uploader.progress
+
+  def copy(self):
+    """
+    Called when requested to copy
+    """
+    self.clearAll()
+    self._copying_.set()
+    # do the copy here
+    self.copier._startCopy_.set()
+    while not self.copier._copying_.isSet():
+      if DEBUG: "wait for copy to start"
+    #
+    self.display.time.deltaStart = time.time()
+    self.display.update(PROCESS)
+    self.display.query.setDefaultQuery(self.waitQueryNum)
+    print 'copy method'
+
+  def copying(self):
+    """
+    Called while copy is running (called from conrtroller run() loop)
+    """
+    self.display.status.message = "copying..."
+    if not self.copier._copying_.isSet():
+      self.cancel()
+    else:
+      self.copier.progress = self.copier.copy.progress
+      self.display.status.message = "copy  %s" % self.copier.progress
 
   def idle(self):
     """
@@ -212,6 +277,7 @@ class Controller(threading.Thread):
       elif self._recording_.isSet(): self.recording()
       elif self._converting_.isSet(): self.converting()
       elif self._uploading_.isSet(): self.uploading()
+      elif self._copying_.isSet(): self.copying()
         
       self.display.update()
       time.sleep(LOOP_DELAY)
@@ -428,9 +494,10 @@ class Uploader(threading.Thread):
     return self._stop_.isSet()
 
   def startUpload(self):
-    self._startUpload_.clear()
-    if DEBUG: print "_startUpload_ set filename: %s" % self.uploadFile
+    if DEBUG: print "startUpload set filename: %s" % self.uploadFile
     self.upload = sU.Upload()
+    # clear this flag after the Upload object has been created
+    self._startUpload_.clear()
     self.upload.upload(self.uploadFile)
     del self.upload
     self.upload = None
@@ -447,9 +514,70 @@ class Uploader(threading.Thread):
       time.sleep(LOOP_DELAY)
       
 
+
+
+class Copier(threading.Thread):
+  def __init__(self):
+    # init parent method
+    threading.Thread.__init__(self)
+    # add events
+    # stop the thread
+    self._stop_ = threading.Event()
+    # clear all threading events
+    self._clear_ = threading.Event()
+    # start the copy
+    self._startCopy_ = threading.Event()
+    # currently copying
+    self._copying_ = threading.Event()
+    self.copy = None
+    self.progress = '.'
+  
+  def clearAll(self,but=None):
+    for a in self.__dict__:
+      if (a[0] == '_' and a[-1] == '_' and a != but and
+          isinstance(self.__dict__[a],threading._Event)):
+        self.__dict__[a].clear()
+
+  def showAll(self):
+    for a in self.__dict__:
+      if (a[0] == '_' and a[-1] == '_' and 
+          isinstance(self.__dict__[a],threading._Event)):
+        print a,self.__dict__[a].isSet()
+
+  def stop(self):
+    self._stop_.set()
+
+  def stopped(self):
+    return self._stop_.isSet()
+
+  def startCopy(self):
+    if DEBUG: print "startCopy"
+    self.copy = sC.Copy()
+    # clear this flag after the Copy object has been created
+    self._startCopy_.clear()
+    # scan the devices
+    self.copy.updateDeviceAttributes()
+    if DEBUG: print "USB devices to which to copy:%s" % self.copy.usbDevices
+    self.copy.copy()
+    del self.copy
+    self.copy = None
+    self._copying_.clear()
+  
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      elif self._startCopy_.isSet():
+        self._copying_.set()
+        self.startCopy()
+      elif self._copying_.isSet():
+        self.progress = self.copy.progress
+      time.sleep(LOOP_DELAY)
+      
+
 if __name__ == '__main__':
   r = Recorder()
   s = Scheduler()
   u = Uploader()
-  c = Controller(r,s,u)
+  d = Copier()
+  c = Controller(r,s,u,d)
   c.start()

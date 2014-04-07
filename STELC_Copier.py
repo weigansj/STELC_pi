@@ -3,14 +3,14 @@
 used by STELC_pi to mount an inserted USB drive
 copy over the wav and log files and unmount the drive
 """
-import re,yaml,sys,os.path
+import re,sys
 import subprocess,time
-from StringIO import StringIO
 
 DEBUG = 1
-PROGRESS_CHARS = ['\\','|','/','-']
+PROGRESS_CHARS = ['.','^','>','v','<']
+DEFAULT_DIR = 'STELC_pi'
 
-class Copier():
+class Copy():
   """
   """
   def __init__(self):
@@ -131,6 +131,7 @@ class Copier():
       try: self.mount(usbDev)
       except: 
         self.progress = "%s mount fail" % self.devDict[usbDev[0]]['label']
+        if DEBUG: print self.progress
         time.sleep(2.0)
     # files for stdout and stderr
     pipeOut = open('copy_stdout.log','w')
@@ -141,7 +142,7 @@ class Copier():
       mntCount += 1
       fileCount = 0
       # open the pipe with the copy command
-      copyCmd = "rsync -Pt --modify-window=2 --include='*.wav' --include='*.log' --exclude='*' ./* %s/STELC_pi/" % mnt
+      copyCmd = "rsync -Pt --modify-window=2 --include='*.wav' --include='*.log' --exclude='*' ./* %s/%s/" % (mnt,DEFAULT_DIR)
       if DEBUG: print "copy command: %s" % copyCmd
       pipeOut.write("copy command: %s\n" % copyCmd)
       pipeErr.write("copy command: %s\n" % copyCmd)
@@ -180,10 +181,13 @@ class Copier():
       try: self.unmount(usbDev)
       except: 
         self.progress = "%s unmount fail" % self.devDict[usbDev[0]]['label']
+        if DEBUG: print self.progress
         time.sleep(2.0)
       try: self.detach(usbDev)
       except: 
-        self.progress = "%s detach fail" % self.devDict[usbDev[0]]['label']
+        # this reports failure but seems to still work
+        #self.progress = "%s detach fail" % self.devDict[usbDev[0]]['label']
+        if DEBUG: print  "%s detach fail" % self.devDict[usbDev[0]]['label']
         time.sleep(2.0)
     self.progress = "DONE"
     if DEBUG: print "DONE"
@@ -191,7 +195,7 @@ class Copier():
 
 
 if __name__ == '__main__':
-  c = Copier()
+  c = Copy()
   c.updateDeviceAttributes()
   print c.usbDevices
   c.copy()

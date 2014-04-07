@@ -103,7 +103,7 @@ class StatusBlock(ScrollingBlock):
     self.offsetRate = 0.5
     self.offsetOscillate = True
     self.offsetTime = time.time()
-    self.blockLength = 9
+    self.blockLength = 10
     self.blockStart = (0,0)
     self.message = ""
     
@@ -180,7 +180,10 @@ class Query():
   """
   def __init__(self,message="Well?",
                     responses=[('Yes',7,True,None),
-                               ('No',11,False,None)],defaultResponse=1):
+                               ('No',11,False,None)],defaultResponse=1,
+                    up=None,
+                    down=None
+              ):
     """
     message is the message for the display
     responses is a list of responses where each response is a tuple containing
@@ -201,6 +204,10 @@ class Query():
     self.selected = None
     # is this a currently actively displayed query
     self.active = False
+    # query number to change to is up is pressed
+    self.up = up
+    # query number to change to is down is pressed
+    self.down = down
 
   def reset(self):
     """
@@ -253,7 +260,6 @@ class Query():
       ml[r[1]+1:len(r[0])+1] = list(r[0])
     ml[self.position:self.position+1]=">"
     return string.join(ml,'')
-
     
 
 class Verifier(Query):
@@ -303,7 +309,18 @@ class QueryBlock():
     self.defaultQuery = self.queries[defaultQuery]
 
   def activateDefault(self):
-    if self.defaultQuery: self.defaultQuery.active = True
+    if self.defaultQuery: 
+      # inactivate all queries
+      for q in self.queries: q.active=False
+      # activate the default query
+      self.defaultQuery.active = True
+
+  def activateQueryNum(self,queryNum):
+    if queryNum >= 0 and queryNum < len(self.queries):
+      # inactivate all queries
+      for q in self.queries: q.active=False
+      # activate query by number
+      self.queries[queryNum].active = True
 
   def addQuery(self,query=Query(),makeDefault=True):
     self.queries.append(query)
@@ -372,6 +389,10 @@ class QueryBlock():
                 q.nextPosition()
               elif pressed == self.lcd.LEFT:
                 q.prevPosition()
+              elif pressed == self.lcd.UP:
+                self.activateQueryNum(q.up)
+              elif pressed == self.lcd.DOWN:
+                self.activateQueryNum(q.down)
               elif pressed == self.lcd.SELECT:
                 # loop through reponces to figure out which was picked
                 for r in q.responses:

@@ -532,6 +532,13 @@ class Display():
     self.lcd.noDisplay()
     self.lcd.backlight(self.lcd.OFF)
 
+  def fail(self,message=''):
+    self.lcd.display()
+    self.lcd.clear()
+    self.lcd.home()
+    self.lcd.backlight(self.lcd.ON)
+    self.lcd.message("EPIC FAIL\n%s" % message)
+
 if __name__ == '__main__':
   d = Display()
   d.status.message = "testing ..."

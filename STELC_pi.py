@@ -6,7 +6,7 @@ import STELC_Scheduler as sS
 import STELC_UploaderDropbox as sU
 import STELC_Copier as sC
 import threading
-import time
+import time,os,re
 
 # LOOP_DELAY from STELC_DISPLAY is the delay between display update loops
 # LOOP_DELAY = 0.2
@@ -23,10 +23,14 @@ RECORD_SECONDS_DEFAULT = 60*90
 
 # string first argument for time.strftime()
 WAVE_FILENAME_FORMAT = 'STELC_%Y%m%d-%H%M.wav' # string first argument for time.strftime()
+PURGE_RE = 'STELC_[0-9]{8}-[0-9]{4}\.' # regular expression for finding files 
+                                       # to purge this needs to match the 
+                                       # WAVE_FILENAME_FORMAT
 
 # time HH:MM to daily update the schedule based on the calendar
 # (updates also happen after events)
 DAILY_UPDATE_TIME = "01:15"
+DAILY_UPDATE_TIME = "16:35"
 
 DEBUG = 1
 sR.DEBUG = DEBUG
@@ -38,7 +42,7 @@ sR.SAMPLING_RATE = 48000
 sU.DEBUG = DEBUG
 sS.DEBUG = DEBUG
 sC.DEBUG = DEBUG
-sC.DEFAULT_DIR = 'STELC_pi'
+sC.COPYCMD = "rsync -Pt --modify-window=2 --include='*.mp3' --include='*.wav' --include='*.log' --exclude='*' ./* %s/STELC_pi/"
   
 class Controller(threading.Thread):
   """
@@ -47,6 +51,7 @@ class Controller(threading.Thread):
   And of course needs to communicate with a recorder thread
   """
   def __init__(self,recorder,scheduler,uploader,copier):
+    self.fail = ''
     self.recorder = recorder
     self.scheduler = scheduler
     self.uploader = uploader
@@ -85,7 +90,7 @@ class Controller(threading.Thread):
     self.display.query.addQuery(
       Query("Copy?",[("Yes",8,False,Action('copy()',gd)),
                      ("No",12,False,Action('pass',gd))],defaultResponse=0,
-                      up=3,down=0 # up or down buttons lead to Record query
+                      up=6,down=0 # up or down buttons lead to Record query
            ),makeDefault=False
     )
     self.copyQueryNum = 3
@@ -104,6 +109,14 @@ class Controller(threading.Thread):
            ),makeDefault=False
     )
     self.waitQueryNum = 5
+    # Purge old files
+    self.display.query.addQuery(
+      Query("Purge?",[("Yes",8,True,Action('purge()',gd)),
+                      ("No",12,False,Action('pass',gd))],defaultResponse=1,
+                      up=6,down=3 # up or down buttons lead to Record query
+           ),makeDefault=False
+    )
+    self.purgeQueryNum = 6
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -128,7 +141,6 @@ class Controller(threading.Thread):
         print a,self.__dict__[a].isSet()
 
   def start(self):
-    if DEBUG: print "expected size %d bytes" % self.getExpectedFilesize()
     self.recorder.start()
     self.scheduler.start()
     self.uploader.start()
@@ -139,19 +151,40 @@ class Controller(threading.Thread):
 
   def stop(self):
     self._stop_.set()
-    self.display.off()
+    fail = self.fail
+    if self.recorder.stopped(): fail += "r.%s" % self.recorder.fail
+    self.recorder.stop()
+    if self.scheduler.stopped(): fail += "s.%s" % self.scheduler.fail
+    self.scheduler.stop()
+    if self.uploader.stopped(): fail += "u.%s" % self.uploader.fail
+    self.uploader.stop()
+    if self.copier.stopped(): fail += "c.%s" % self.copier.fail
+    self.copier.stop()
+    self.fail = fail
 
   def stopped(self):
     return self._stop_.isSet()
 
-  def getExpectedFilesize(self):
-    """
-    expected size in bytes
-    """
-    size = sR.SAMPLE_SIZE*sR.INPUT_CHANNELS*sR.SAMPLING_RATE
-    if self.scheduler.getDuration() > 0: size *= self.scheduler.getDuration()
-    else: size *= RECORD_SECONDS_DEFAULT
-    return size
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      elif self._cancel_.isSet(): self.cancel()
+      elif self._recording_.isSet(): self.recording()
+      elif self._converting_.isSet(): self.converting()
+      elif self._uploading_.isSet(): self.uploading()
+      elif self._copying_.isSet(): self.copying()
+      elif self.recorder._stop_.isSet(): self.stop()
+      elif self.scheduler._stop_.isSet(): self.stop()
+      elif self.uploader._stop_.isSet(): self.stop()
+      elif self.copier._stop_.isSet(): self.stop()
+      else: self.checkSchedule()
+        
+      self.display.update()
+      time.sleep(LOOP_DELAY)
+
+    # these run on the way out after a stop was requested
+    self.display.fail(self.fail)
+    #self.display.off()
 
   def cancel(self):
     """
@@ -325,6 +358,12 @@ class Controller(threading.Thread):
     """
     self.scheduler._update_.set()
 
+  def purge(self):
+    """
+    Called when requested to purge old recordings
+    """
+    self.scheduler._purge_.set()
+
   def idle(self):
     """
     Called when we want to return to idle
@@ -335,19 +374,6 @@ class Controller(threading.Thread):
     self.display.update(IDLE)
     self.display.query.setDefaultQuery(self.recordQueryNum)
 
-  def run(self):
-    while not self.stopped():
-      if self._clear_.isSet(): self.clearAll()
-      elif self._cancel_.isSet(): self.cancel()
-      elif self._recording_.isSet(): self.recording()
-      elif self._converting_.isSet(): self.converting()
-      elif self._uploading_.isSet(): self.uploading()
-      elif self._copying_.isSet(): self.copying()
-      else: self.checkSchedule()
-        
-      self.display.update()
-      time.sleep(LOOP_DELAY)
-
 
 class Recorder(threading.Thread):
   """
@@ -355,6 +381,7 @@ class Recorder(threading.Thread):
   controlling the recorder.
   """
   def __init__(self):
+    self.fail = ''
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -387,15 +414,19 @@ class Recorder(threading.Thread):
           isinstance(self.__dict__[a],threading._Event)):
         print a,self.__dict__[a].isSet()
 
-#  def start(self):
-#    self.thread = threading.Thread(None, self.run, None, (), {})
-#    self.thread.start()
-#
   def stop(self):
     self._stop_.set()
 
   def stopped(self):
     return self._stop_.isSet()
+
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      #elif self._stopRecording_.isSet(): self.stopRecording()
+      #elif self._pauseRecording_.isSet(): self.pauseRecording()
+      #elif self._startRecording_.isSet(): self.startRecording()
+      time.sleep(LOOP_DELAY)
 
   def setFilename(self, *name):
     """
@@ -478,17 +509,10 @@ class Recorder(threading.Thread):
       raise threading.ThreadingError, 'can not stop; _recording_ event not set'
     return filename
 
-  def run(self):
-    while not self.stopped():
-      if self._clear_.isSet(): self.clearAll()
-      #elif self._stopRecording_.isSet(): self.stopRecording()
-      #elif self._pauseRecording_.isSet(): self.pauseRecording()
-      #elif self._startRecording_.isSet(): self.startRecording()
-      time.sleep(LOOP_DELAY)
-
 
 class Scheduler(threading.Thread):
   def __init__(self):
+    self.fail = ''
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -498,6 +522,8 @@ class Scheduler(threading.Thread):
     self._clear_ = threading.Event()
     # request update of schedule from calendar
     self._update_ = threading.Event()
+    # request purge of old recordings
+    self._purge_ = threading.Event()
     # when record is called as a result of a scheduled event
     self._event_ = threading.Event()
     # when an event needs updating back to the calendar
@@ -505,10 +531,15 @@ class Scheduler(threading.Thread):
     # this is created as the start because
     # it needs to store an event
     self.schedule = sS.Schedule()
+  
+  def start(self):
     # do an update on startup
     self.schedule.connect()
     self.schedule.getNext()
-  
+    if DEBUG: print "expected size %d bytes" % self.getExpectedFilesize()
+    self.thread = threading.Thread(None, self.run, None, (), {})
+    self.thread.start()
+
   def clearAll(self,but=None):
     for a in self.__dict__:
       if (a[0] == '_' and a[-1] == '_' and a != but and
@@ -520,6 +551,48 @@ class Scheduler(threading.Thread):
       if (a[0] == '_' and a[-1] == '_' and 
           isinstance(self.__dict__[a],threading._Event)):
         print a,self.__dict__[a].isSet()
+
+  def stop(self):
+    self._stop_.set()
+
+  def stopped(self):
+    return self._stop_.isSet()
+
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      elif self._update_.isSet(): self.updateEvent()
+      elif self._purge_.isSet(): self.purgeOld()
+      elif self._event_.isSet(): pass
+      elif self._eventUpdate_.isSet(): self.putEvent()
+      elif time.strftime('%H:%M',time.localtime()) == DAILY_UPDATE_TIME:
+        startTime = time.time()
+        self.purgeOld()
+        self.updateEvent()
+        # if the update is fast, force it to take a minute
+        # so that my daily check only happens once
+        endTime = time.time()
+        if endTime - startTime <= 60.: time.sleep(60.+startTime-endTime)
+      time.sleep(LOOP_DELAY)
+
+  def epicFail(self,fail=''):
+    self.fail = fail
+    self.stop()
+
+  def getAvailableSpace(self):
+    """
+    available space on device
+    """
+    return os.statvfs('.').f_bsize*os.statvfs('.').f_bavail
+
+  def getExpectedFilesize(self):
+    """
+    expected size of next scheduled recording in bytes
+    """
+    size = sR.SAMPLE_SIZE*sR.INPUT_CHANNELS*sR.SAMPLING_RATE
+    if self.getDuration() > 0: size *= self.getDuration()
+    else: size *= RECORD_SECONDS_DEFAULT
+    return size
 
   def updateEvent(self):
     self._update_.clear()
@@ -554,35 +627,50 @@ class Scheduler(threading.Thread):
 
   def putEvent(self):
     """
-    update calendar item descripts based on event status
+    update calendar item description based on event status
     """
     self._eventUpdate_.clear()
     self.schedule.connect()
     self.schedule.putEvent()
 
-  def stop(self):
-    self._stop_.set()
-
-  def stopped(self):
-    return self._stop_.isSet()
-
-  def run(self):
-    while not self.stopped():
-      if self._clear_.isSet(): self.clearAll()
-      elif self._update_.isSet(): self.updateEvent()
-      elif self._event_.isSet(): pass
-      elif self._eventUpdate_.isSet(): self.putEvent()
-      elif time.strftime('%H:%M',time.localtime()) == DAILY_UPDATE_TIME:
-        startTime = time.time()
-        # if the update is fast, force it to take a minute
-        # so that my daily check only happens once
-        endTime = time.time()
-        if endTime - startTime <= 60.: time.sleep(60.+startTime-endTime)
-      time.sleep(LOOP_DELAY)
+  def purgeOld(self):
+    """
+    purge old recordings
+    """
+    self._purge_.clear()
+    # get all files recorded and converted  by STELC_pi
+    purgeList = filter(lambda x:re.search(PURGE_RE,x),os.listdir('.'))
+    # sort based on modification times
+    purgeList.sort(cmp=lambda x,y: cmp(os.stat(x).st_mtime,os.stat(y).st_mtime))
+    if DEBUG: print purgeList
+    # lets take the most recent recording off the table for purging
+    purgeList.pop()
+    # go through the purge list starting with the oldest
+    purgeList.reverse()
+    purgeSchedule = sS.Schedule()
+    while purgeList:
+      if self.getExpectedFilesize()*2.5 > self.getAvailableSpace():
+        fileToPurge = purgeList.pop()
+        # remove the file
+        if DEBUG: print "removing %s" % fileToPurge
+        os.remove(fileToPurge)
+        # find any events that match this file
+        purgeSchedule.connect()
+        purgeSchedule.getBy('filename',fileToPurge)
+        # mark as purged
+        purgeSchedule.event['status']['purged']=True
+        # if an id has been assigned it is on calendar and should be updated
+        if purgeSchedule.event['id']: purgeSchedule.putEvent()
+      else:
+        break
+    # the only time we will exit this loop normally is if we run out of files
+    # and we still do not have enough space on the device
+    else: self.epicFail("disk full")
 
 
 class Uploader(threading.Thread):
   def __init__(self):
+    self.fail = ''
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -618,16 +706,6 @@ class Uploader(threading.Thread):
 
   def stopped(self):
     return self._stop_.isSet()
-
-  def startUpload(self):
-    if DEBUG: print "startUpload set filename: %s" % self.uploadFile
-    self.upload = sU.Upload()
-    # clear this flag after the Upload object has been created
-    self._startUpload_.clear()
-    self.upload.upload(self.uploadFile)
-    del self.upload
-    self.upload = None
-    self._uploading_.clear()
   
   def run(self):
     while not self.stopped():
@@ -638,12 +716,23 @@ class Uploader(threading.Thread):
       elif self._uploading_.isSet():
         self.progress = self.upload.progress
       time.sleep(LOOP_DELAY)
+
+  def startUpload(self):
+    if DEBUG: print "startUpload set filename: %s" % self.uploadFile
+    self.upload = sU.Upload()
+    # clear this flag after the Upload object has been created
+    self._startUpload_.clear()
+    self.upload.upload(self.uploadFile)
+    del self.upload
+    self.upload = None
+    self._uploading_.clear()
       
 
 
 
 class Copier(threading.Thread):
   def __init__(self):
+    self.fail = ''
     # init parent method
     threading.Thread.__init__(self)
     # add events
@@ -675,6 +764,16 @@ class Copier(threading.Thread):
 
   def stopped(self):
     return self._stop_.isSet()
+  
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      elif self._startCopy_.isSet():
+        self._copying_.set()
+        self.startCopy()
+      elif self._copying_.isSet():
+        self.progress = self.copy.progress
+      time.sleep(LOOP_DELAY)
 
   def startCopy(self):
     if DEBUG: print "startCopy"
@@ -688,16 +787,6 @@ class Copier(threading.Thread):
     del self.copy
     self.copy = None
     self._copying_.clear()
-  
-  def run(self):
-    while not self.stopped():
-      if self._clear_.isSet(): self.clearAll()
-      elif self._startCopy_.isSet():
-        self._copying_.set()
-        self.startCopy()
-      elif self._copying_.isSet():
-        self.progress = self.copy.progress
-      time.sleep(LOOP_DELAY)
       
 
 if __name__ == '__main__':

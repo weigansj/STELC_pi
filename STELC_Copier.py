@@ -8,7 +8,7 @@ import subprocess,time
 
 DEBUG = 1
 PROGRESS_CHARS = ['.','^','>','v','<']
-DEFAULT_DIR = 'STELC_pi'
+COPYCMD = "rsync -Pt --modify-window=2 --include='*.mp3' --include='*.wav' --include='*.log' --exclude='*' ./* %s/STELC_pi/" # command used to copy the files the %s is the USB mount point
 
 class Copy():
   """
@@ -142,7 +142,7 @@ class Copy():
       mntCount += 1
       fileCount = 0
       # open the pipe with the copy command
-      copyCmd = "rsync -Pt --modify-window=2 --include='*.wav' --include='*.log' --exclude='*' ./* %s/%s/" % (mnt,DEFAULT_DIR)
+      copyCmd = COPYCMD % mnt
       if DEBUG: print "copy command: %s" % copyCmd
       pipeOut.write("copy command: %s\n" % copyCmd)
       pipeErr.write("copy command: %s\n" % copyCmd)

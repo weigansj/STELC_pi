@@ -3,10 +3,13 @@
 from STELC_Display import *
 import STELC_Recorder as sR
 import STELC_Scheduler as sS
-import STELC_UploaderDropbox as sU
+import STELC_UploaderDropbox as sUD
+#import STELC_UploaderDropbox as sU
+import STELC_UploaderGoogleDrive as sU
+import STELC_Converter as sV
 import STELC_Copier as sC
 import threading
-import time,os,re
+import time,os,re,glob,sys
 
 # LOOP_DELAY from STELC_DISPLAY is the delay between display update loops
 # LOOP_DELAY = 0.2
@@ -30,7 +33,11 @@ PURGE_RE = 'STELC_[0-9]{8}-[0-9]{4}\.' # regular expression for finding files
 # time HH:MM to daily update the schedule based on the calendar
 # (updates also happen after events)
 DAILY_UPDATE_TIME = "01:15"
-DAILY_UPDATE_TIME = "16:35"
+# purge will delete recordings until 
+# there is space for the next event * this factor
+SPACE_ALLOWANCE_FACTOR = 2.5
+# used for indicating progress if needed
+PROGRESS_CHARS = ['.','^','>','v','<']
 
 DEBUG = 1
 sR.DEBUG = DEBUG
@@ -39,9 +46,16 @@ sR.SAMPLE_SIZE = sR.pyaudio.get_sample_size(sR.INPUT_FORMAT)
 sR.INPUT_CHANNELS = 1
 sR.SAMPLING_RATE = 48000
 
+sV.DEBUG = DEBUG
+sV.CONVERTER = '/usr/bin/sox -S %s %s' 
+
 sU.DEBUG = DEBUG
+sUD.DEBUG = DEBUG
+
 sS.DEBUG = DEBUG
+
 sC.DEBUG = DEBUG
+sC.PROGRESS_CHARS = PROGRESS_CHARS
 sC.COPYCMD = "rsync -Pt --modify-window=2 --include='*.mp3' --include='*.wav' --include='*.log' --exclude='*' ./* %s/STELC_pi/"
   
 class Controller(threading.Thread):
@@ -50,10 +64,11 @@ class Controller(threading.Thread):
   controlling the display.  This is where the display triggered methods go
   And of course needs to communicate with a recorder thread
   """
-  def __init__(self,recorder,scheduler,uploader,copier):
+  def __init__(self,recorder,scheduler,converter,uploader,copier):
     self.fail = ''
     self.recorder = recorder
     self.scheduler = scheduler
+    self.converter = converter
     self.uploader = uploader
     self.copier = copier
     self.display = Display()
@@ -143,6 +158,7 @@ class Controller(threading.Thread):
   def start(self):
     self.recorder.start()
     self.scheduler.start()
+    self.converter.start()
     self.uploader.start()
     self.copier.start()
     self.display.on()
@@ -156,6 +172,8 @@ class Controller(threading.Thread):
     self.recorder.stop()
     if self.scheduler.stopped(): fail += "s.%s" % self.scheduler.fail
     self.scheduler.stop()
+    if self.converter.stopped(): fail += "v.%s" % self.converter.fail
+    self.converter.stop()
     if self.uploader.stopped(): fail += "u.%s" % self.uploader.fail
     self.uploader.stop()
     if self.copier.stopped(): fail += "c.%s" % self.copier.fail
@@ -175,6 +193,7 @@ class Controller(threading.Thread):
       elif self._copying_.isSet(): self.copying()
       elif self.recorder._stop_.isSet(): self.stop()
       elif self.scheduler._stop_.isSet(): self.stop()
+      elif self.converter._stop_.isSet(): self.stop()
       elif self.uploader._stop_.isSet(): self.stop()
       elif self.copier._stop_.isSet(): self.stop()
       else: self.checkSchedule()
@@ -197,11 +216,19 @@ class Controller(threading.Thread):
       self._recording_.clear()
       recordedFile = self.recorder.stopRecording()
       # now pass off to the next step
-      # self.convert(myFilename)
-      self.upload(recordedFile)
+      self.convert(recordedFile)
+      #self.upload(recordedFile)
     elif self._converting_.isSet():
       self._converting_.clear()
-      self.idle()
+      convertedFile = self.converter.convertedFile
+      # TODO find way to terminate convert
+      if DEBUG: print "convert %s complete" % self.converter.progress
+      # if this is a scheduled event update the events convert status
+      if self.scheduler._event_.isSet():
+        self.scheduler.updateItems(converted=True,
+                                   convertFmt=self.converter.convertFormat )
+      # now pass off to the next step
+      self.upload(convertedFile)
     elif self._uploading_.isSet():
       self._uploading_.clear()
       uploadedFile = self.uploader.uploadFile
@@ -224,6 +251,9 @@ class Controller(threading.Thread):
       # update schedule if there was no event
       # as is the case when the Update Query is selected
       self.updateSchedule()
+      # go ahead and upload the logs too
+      # TODO this is risky because it does not give a status
+      self.scheduler.uploadLogs()
 
   def record(self, recordSeconds = RECORD_SECONDS_DEFAULT):
     """
@@ -267,10 +297,14 @@ class Controller(threading.Thread):
     """
     self.clearAll()
     self._converting_.set()
+    # do convertion here
+    self.converter.convertFile = filename
+    self.converter._startConvert_.set()
+    while not self.converter._converting_.isSet():
+      if DEBUG: "wait for convert to start"
     self.display.time.deltaStart = time.time()
     self.display.update(PROCESS)
-    self.display.query.setDefaultQuery(self.cancelQueryNum)
-    self.display.query.clearMessage()
+    self.display.query.setDefaultQuery(self.waitQueryNum)
     print 'convert method'
 
   def converting(self):
@@ -278,7 +312,11 @@ class Controller(threading.Thread):
     Called while converting is running (called from conrtroller run() loop)
     """
     self.display.status.message = "converting..."
-    self.cancel()
+    if not self.converter._converting_.isSet():
+      self.cancel()
+    else:
+      self.converter.progress = self.converter.convert.progress
+      self.display.status.message = "convert %s" % self.converter.progress
 
   def upload(self,uploadFile):
     """
@@ -305,7 +343,17 @@ class Controller(threading.Thread):
     if not self.uploader._uploading_.isSet():
       self.cancel()
     else:
-      self.uploader.progress = self.uploader.upload.progress
+      # if the upload updates its progress this will be displayed
+      # otherwise we can use the standin
+      if not self.uploader.upload.progress:
+        if not self.uploader.progress in PROGRESS_CHARS:
+          self.uploader.progress = PROGRESS_CHARS[0]
+        else:
+          self.uploader.progress = PROGRESS_CHARS[(PROGRESS_CHARS.index(
+                      self.uploader.progress)+1) % len(PROGRESS_CHARS)]
+        if DEBUG: print self.uploader.progress
+      else:
+        self.uploader.progress = self.uploader.upload.progress
       self.display.status.message = "upload %s" % self.uploader.progress
 
   def copy(self):
@@ -561,14 +609,16 @@ class Scheduler(threading.Thread):
   def run(self):
     while not self.stopped():
       if self._clear_.isSet(): self.clearAll()
+      elif self._eventUpdate_.isSet(): self.putEvent()
+      # if we are in the middle on an event, only eventUpdates are allowed
+      elif self._event_.isSet(): pass
       elif self._update_.isSet(): self.updateEvent()
       elif self._purge_.isSet(): self.purgeOld()
-      elif self._event_.isSet(): pass
-      elif self._eventUpdate_.isSet(): self.putEvent()
       elif time.strftime('%H:%M',time.localtime()) == DAILY_UPDATE_TIME:
         startTime = time.time()
         self.purgeOld()
         self.updateEvent()
+        self.uploadLogs()
         # if the update is fast, force it to take a minute
         # so that my daily check only happens once
         endTime = time.time()
@@ -633,6 +683,17 @@ class Scheduler(threading.Thread):
     self.schedule.connect()
     self.schedule.putEvent()
 
+  def uploadLogs(self):
+    print "*** %s Available Space %d MB" % (time.ctime(),
+                                  self.getAvailableSpace())
+    sys.stdout.flush()
+    sys.stderr.flush()
+    for logFile in glob.glob('*.log'):
+      if DEBUG: print "upload filename: %s" % logFile
+      upload = sUD.Upload()
+      upload.upload(logFile)
+      del upload
+
   def purgeOld(self):
     """
     purge old recordings
@@ -649,7 +710,7 @@ class Scheduler(threading.Thread):
     purgeList.reverse()
     purgeSchedule = sS.Schedule()
     while purgeList:
-      if self.getExpectedFilesize()*2.5 > self.getAvailableSpace():
+      if self.getExpectedFilesize()*SPACE_ALLOWANCE_FACTOR > self.getAvailableSpace():
         fileToPurge = purgeList.pop()
         # remove the file
         if DEBUG: print "removing %s" % fileToPurge
@@ -666,6 +727,71 @@ class Scheduler(threading.Thread):
     # the only time we will exit this loop normally is if we run out of files
     # and we still do not have enough space on the device
     else: self.epicFail("disk full")
+    del purgeSchedule
+
+
+class Converter(threading.Thread):
+  def __init__(self):
+    self.fail = ''
+    # init parent method
+    threading.Thread.__init__(self)
+    # add events
+    # stop the thread
+    self._stop_ = threading.Event()
+    # clear all threading events
+    self._clear_ = threading.Event()
+    # start the convertion
+    # I think I will need this here becuase the convertion
+    # blocks as opposed the the record.start() above which used the callback
+    # withing the STELC_Recorder module
+    self._startConvert_ = threading.Event()
+    # currently converting
+    self._converting_ = threading.Event()
+    self.convert = None
+    self.convertFormat = 'mp3'
+    self.convertFile = ''
+    self.convertedFile = ''
+    self.progress = '0%'
+    self.clip = 0
+  
+  def clearAll(self,but=None):
+    for a in self.__dict__:
+      if (a[0] == '_' and a[-1] == '_' and a != but and
+          isinstance(self.__dict__[a],threading._Event)):
+        self.__dict__[a].clear()
+
+  def showAll(self):
+    for a in self.__dict__:
+      if (a[0] == '_' and a[-1] == '_' and 
+          isinstance(self.__dict__[a],threading._Event)):
+        print a,self.__dict__[a].isSet()
+
+  def stop(self):
+    self._stop_.set()
+
+  def stopped(self):
+    return self._stop_.isSet()
+  
+  def run(self):
+    while not self.stopped():
+      if self._clear_.isSet(): self.clearAll()
+      elif self._startConvert_.isSet():
+        self._converting_.set()
+        self.startConvert()
+      elif self._converting_.isSet():
+        self.progress = self.convert.progress
+        self.clip = self.convert.clip
+      time.sleep(LOOP_DELAY)
+
+  def startConvert(self):
+    if DEBUG: print "startConvert set filename: %s" % self.convertFile
+    self.convert = sV.Convert()
+    # clear this flag after the Convert object has been created
+    self._startConvert_.clear()
+    self.convertedFile = self.convert.convert(self.convertFile,self.convertFormat)
+    del self.convert
+    self.convert = None
+    self._converting_.clear()
 
 
 class Uploader(threading.Thread):
@@ -726,8 +852,6 @@ class Uploader(threading.Thread):
     del self.upload
     self.upload = None
     self._uploading_.clear()
-      
-
 
 
 class Copier(threading.Thread):
@@ -792,7 +916,8 @@ class Copier(threading.Thread):
 if __name__ == '__main__':
   r = Recorder()
   s = Scheduler()
+  v = Converter()
   u = Uploader()
   d = Copier()
-  c = Controller(r,s,u,d)
+  c = Controller(r,s,v,u,d)
   c.start()

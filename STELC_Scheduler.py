@@ -111,7 +111,7 @@ class Schedule():
       OAUTH_SERVICE_EMAIL_ADDRESS,
       key,
       scope=('https://www.googleapis.com/auth/calendar',),
-      user_agent='STELC_pi/0.0')
+      user_agent='STELC_pi/1.0')
     http = httplib2.Http()
     self.http = credentials.authorize(http)
     self.service = build("calendar", "v3", http=self.http)
@@ -222,6 +222,9 @@ class Schedule():
       body={'description':yaml.dump(self.event['status'],
                                     default_flow_style=False)}
     ).execute(http=self.http)
+    if DEBUG: 
+      print "updated status of event on calendar"
+      pprint.pprint(self.event)
 
 
 def main(argv):

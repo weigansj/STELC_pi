@@ -18,57 +18,113 @@
 """
 import httplib2
 import pprint
-import sys
+import sys,os.path
 
 from apiclient.discovery import build
 from oauth2client.client import SignedJwtAssertionCredentials
+from apiclient import errors
+from apiclient.http import MediaFileUpload
 from GoogleCreds import *
 
+DEBUG = 2
+
 class Upload():
+  """
+  This is for uploading the recorded file to Google Drive
+  """
+
   def __init__(self):
-    pass
+    self.progress = None
+    self.localFile = ''
+    self.remoteFile = ''
+    self.http = None
+    self.service = None
 
-  def start():
-    pass
+  def connect(self):
+    """
+    connect to the Google Drive API
+    """
+    # Load the key in PKCS 12 format that you downloaded from the Google API
+    # Console when you created your Service account.
+    f = file(OAUTH_SERVICE_PRIVATE_KEY_FILENAME, 'rb')
+    key = f.read()
+    f.close()
 
-
-def main(argv):
-  # Load the key in PKCS 12 format that you downloaded from the Google API
-  # Console when you created your Service account.
-  f = file(OAUTH_SERVICE_PRIVATE_KEY_FILENAME, 'rb')
-  key = f.read()
-  f.close()
-
-  # Create an httplib2.Http object to handle our HTTP requests and authorize it
-  # with the Credentials. Note that the first parameter, service_account_name,
-  # is the Email address created for the Service account. It must be the email
-  # address associated with the key that was created.
-  credentials = SignedJwtAssertionCredentials(
+    # Create an httplib2.Http object to handle our HTTP requests and 
+    # authorize it with the Credentials. Note that the first parameter, 
+    # service_account_name, is the Email address created for the Service 
+    # account. It must be the email address associated with the key that 
+    # was created.
+    credentials = SignedJwtAssertionCredentials(
       OAUTH_SERVICE_EMAIL_ADDRESS,
       key,
       scope=('https://www.googleapis.com/auth/drive',),
-      user_agent='STELC_pi/0.0')
-  http = httplib2.Http()
-  http = credentials.authorize(http)
+      user_agent='STELC_pi/1.0')
+    http = httplib2.Http()
+    self.http = credentials.authorize(http)
+    self.service = build("drive", "v2", http=self.http)
 
-  service = build("drive", "v2", http=http)
+  def getFolderId(self):
+    # List all files
+    topFiles = self.service.files().list().execute(http=self.http)
+    #pprint.pprint(topFiles)
+   
+    # shared folder
+    folderId = filter(lambda x:(
+                       x['title']==OAUTH_SERVICE_SHARED_FOLDER_TITLE and 
+                       x['mimeType']==u'application/vnd.google-apps.folder'),
+                     topFiles['items'])[0]['id']
+    # list contents
+    if DEBUG > 1:
+      for child in self.service.children().list(
+                        folderId=folderId).execute(http=self.http)['items']:
+         fileMeta = self.service.files().get(
+                        fileId=child['id']).execute(http=self.http)
+         pprint.pprint(fileMeta)
 
-  # List all files
-  topFiles = service.files().list().execute(http=http)
-  #pprint.pprint(topFiles)
+    return folderId
+                     
+  def upload(self,uploadFile):
+    """
+    upload the file given and track the progress
+    This does the full connect, get folder is and upload
+    so that it is interchangable with the Dropbox Uploader
+    """
+    # local filename
+    self.localFile = os.path.abspath(uploadFile)
+    # filename on Dropbox
+    self.remoteFile = os.path.basename(self.localFile)
+    # connect to Google Drive API
+    self.connect()
+    folderId = self.getFolderId()
+    # media body
+    # determine mime type
+    ext = os.path.splitext(uploadFile)[-1]
+    mime_type='application/vnd.google-apps.audio'
+    if ext == '.mp3' or ext == '.MP3': mime_type='audio/mpeg'
+    if ext == '.wav' or ext == '.WAV': mime_type='audio/x-wav'
+    if ext == '.log' or ext == '.log': mime_type='text/plain'
+    media_body = MediaFileUpload(self.localFile,mimetype=mime_type,resumable=True)
+    body = {
+      'title': uploadFile,
+      'descrption': 'recorded service',
+      'mimeType': mime_type,
+      'parents': [{'id': folderId}]
+    }
+    try:
+      thisFile = self.service.files().insert(
+        body=body,
+        media_body=media_body).execute(http=self.http)
+      if DEBUG: print 'File ID: %s' % thisFile['id']
+      if DEBUG > 1: pprint.pprint(thisFile)
+      return thisFile
+    except errors.HttpError, error:
+      print 'An error occured: %s' % error
+      return None
 
-  # shared folder
-  folderId = filter(lambda x:(
-                      x['title']==OAUTH_SERVICE_SHARED_FOLDER_TITLE and 
-                      x['mimeType']==u'application/vnd.google-apps.folder'),
-                    topFiles['items'])[0]['id']
-                    
-  # list contents
-  for child in service.children().list(folderId=folderId).execute(http=http)['items']:
-      fileMeta = service.files().get(fileId=child['id']).execute(http=http)
-      pprint.pprint(fileMeta)
 
-  #get id for folder
-    
 if __name__ == '__main__':
-  main(sys.argv)
+  #main(sys.argv)
+  u = Upload()
+  u.upload(sys.argv[-1])
+  del u
